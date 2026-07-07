@@ -2524,6 +2524,67 @@ final class Mahamsoft_Pharmacy_API
      */
     private function call($endpoint, array $body)
     {
+        $base = $this->cfg('api_base_url', '');
+
+        if (empty($base)) {
+            return new WP_Error(
+                'no_base_url',
+                __('آدرس وب‌سرویس در تنظیمات وارد نشده است.', 'mahamsoft-order-edit'),
+                array('solution' => __('آدرس پایه API را در تنظیمات پلاگین وارد کنید.', 'mahamsoft-order-edit'))
+            );
+        }
+
+        $url = rtrim($base, '/') . '/' . ltrim($endpoint, '/');
+
+        $resp = wp_remote_post($url, array(
+            'method' => 'POST',
+            'timeout' => 15,
+            'sslverify' => false,
+            'headers' => array(
+                'Content-Type' => 'application/json',
+                'x-api-key' => $this->cfg('api_key', ''),
+            ),
+            'body' => wp_json_encode($body),
+        ));
+
+        if (is_wp_error($resp)) {
+            $this->log_error('Network error در تماس با ' . $endpoint, array('error' => $resp->get_error_message()));
+            return new WP_Error(
+                'network_error',
+                $resp->get_error_message(),
+                array('solution' => __('اتصال شبکه به سرور انبار برقرار نشد. IP/دامنه و فایروال را بررسی کنید.', 'mahamsoft-order-edit'))
+            );
+        }
+
+        $code = wp_remote_retrieve_response_code($resp);
+        $raw = wp_remote_retrieve_body($resp);
+
+        if ($code < 200 || $code >= 300) {
+            $this->log_error("HTTP error {$code} در {$endpoint}", array('raw' => $raw));
+            return new WP_Error(
+                'http_error',
+                sprintf('HTTP %d: %s', $code, $raw),
+                array('solution' => __('کد API Key و آدرس endpoint را بررسی کنید.', 'mahamsoft-order-edit'))
+            );
+        }
+
+        $decoded = json_decode($raw, true);
+
+        if (null === $decoded) {
+            $this->log_error("JSON نامعتبر از {$endpoint}", array('raw' => $raw));
+            return new WP_Error('json_error', "پاسخ JSON نامعتبر: {$raw}");
+        }
+
+        if (!empty($decoded['error'])) {
+            $msg = is_string($decoded['error']) ? $decoded['error'] : wp_json_encode($decoded['error']);
+            $this->log_error("خطای سطح API از {$endpoint}: {$msg}");
+            return new WP_Error('api_error', $msg, array('raw' => $decoded));
+        }
+
+        return $decoded;
+    }
+    private function call0($endpoint, array $body)
+    {
 
         $base = $this->cfg('api_base_url', '');
 
@@ -2663,6 +2724,36 @@ final class Mahamsoft_Pharmacy_API
         }
 
         return false;
+    }
+
+    /**
+     * ثبت خطا هم در لاگر ووکامرس و هم به‌صورت آخرین خطای شناخته‌شده در آپشن
+     * (برای نمایش احتمالی در صفحه تنظیمات - مشابه Api::saveLastConnectionStatus)
+     */
+    private function log_error($message, array $context = array())
+    {
+        if (function_exists('wc_get_logger')) {
+            wc_get_logger()->error($message, array_merge(array('source' => 'mahamsoft-pharmacy-api'), $context));
+        }
+
+        update_option('mahamsoft_pharmacy_last_error', array(
+            'message' => $message,
+            'context' => $context,
+            'time' => current_time('mysql'),
+        ), false);
+
+        // در حالت دیباگ در debug.log نیز ثبت شود
+        if (defined('WP_DEBUG') && WP_DEBUG) {
+            error_log(
+                sprintf(
+                    '[MahamSoft Pharmacy] %s | %s',
+                    $message,
+                    wp_json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                )
+            );
+        }
+
+        $this->log($context, true, $message);
     }
 
     private function log($object, $print_r = true, $title = null)
